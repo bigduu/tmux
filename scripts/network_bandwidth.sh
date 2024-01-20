@@ -1,107 +1,86 @@
 #!/usr/bin/env bash
+#CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# INTERVAL is equal to 1s because we want to express the bandwidth in sec
-readonly INTERVAL=1
+PATH="/usr/local/bin:$PATH:/usr/sbin"
 
-# UPLOAD and DOWNLOAD index
-readonly UPLOAD=0
-readonly DOWNLOAD=1
+get_bandwidth_for_osx() {
+  netstat -ibn | awk 'FNR > 1 {
+    interfaces[$1 ":bytesReceived"] = $(NF-4);
+    interfaces[$1 ":bytesSent"]     = $(NF-1);
+  } END {
+    for (itemKey in interfaces) {
+      split(itemKey, keys, ":");
+      interface = keys[1]
+      dataKind = keys[2]
+      sum[dataKind] += interfaces[itemKey]
+    }
 
-# SIZE index are the multiple of the unit byte and value the internationally recommended unit symbol in sec
-readonly SIZE=(
-  [1]='B/s'
-  [1024]='kB/s'
-  [1048576]='MB/s'
-  [1073741824]='GB/s'
-)
-
-# interface_get try to automaticaly get the used interface if network_name is empty
-interface_get() {
-  name="$(tmux show-option -gqv "@dracula-network-bandwidth")"
-
-  if [[ -z $name ]]; then
-    case "$(uname -s)" in
-    Linux)
-      if type ip >/dev/null; then
-        name="$(ip -o route get 192.168.0.0 | awk '{print $5}')"
-      fi
-      ;;
-    esac
-  fi
-
-  echo "$name"
+    print sum["bytesReceived"], sum["bytesSent"]
+  }'
 }
 
-# interface_bytes give interface name and signal tx/rx return Bytes
-interface_bytes() {
-  cat "/sys/class/net/$1/statistics/$2_bytes"
+os_type() {
+  local os_name="unknown"
+
+  case $(uname | tr '[:upper:]' '[:lower:]') in
+  linux*)
+    os_name="linux"
+    ;;
+  darwin*)
+    os_name="osx"
+    ;;
+  msys*)
+    os_name="windows"
+    ;;
+  freebsd*)
+    os_name="freebsd"
+    ;;
+  esac
+
+  echo -n $os_name
 }
 
-# get_bandwidth return the number of bytes exchanged for tx and rx
 get_bandwidth() {
-  upload="$(interface_bytes "$1" "tx")"
-  download="$(interface_bytes "$1" "rx")"
+  local os="$1"
 
-  #wait the interval for Wait for interval to calculate the difference
-  sleep "$INTERVAL"
-
-  upload="$(bc <<<"$(interface_bytes "$1" "tx") - $upload")"
-  download="$(bc <<<"$(interface_bytes "$1" "rx") - $download")"
-
-  #set to 0 by default useful for non-existent interface
-  echo "${upload:-0} ${download:-0}"
+  case $os in
+  osx)
+    echo -n $(get_bandwidth_for_osx)
+    return 0
+    ;;
+  linux)
+    echo -n $(get_bandwidth_for_linux)
+    return 0
+    ;;
+  *)
+    echo -n "0 0"
+    return 1
+    ;;
+  esac
 }
 
-# bandwidth_to_unit convert bytes into its highest unit and add unit symbol in sec
-bandwidth_to_unit() {
-  local size=1
-  for i in "${!SIZE[@]}"; do
-    if (($1 < i)); then
-      break
-    fi
-
-    size="$i"
-  done
-
-  local result="0.00"
-  if (($1 != 0)); then
-    result="$(bc <<<"scale=2; $1 / $size")"
-  fi
-
-  echo "$result ${SIZE[$size]}"
+format_speed() {
+  numfmt --to=iec-i --suffix "B/s" --format "%f" --padding 5 $1
 }
 
 main() {
-  counter=0
-  bandwidth=()
 
-  network_name=""
-  show_interface="$(tmux show-option -gqv "@dracula-network-bandwidth-show-interface")"
-  interval_update="$(tmux show-option -gqv "@dracula-network-bandwidth-interval")"
+  sleep_time=1
 
   if [[ -z $interval_update ]]; then
-    interval_update=0
-  fi
-
-  if ! command -v bc &> /dev/null
-  then
-    echo "command bc could not be found!"
-    exit 1
+    interval_update=1
   fi
 
   while true; do
-    if ((counter == 0)); then
-      counter=60
-      network_name="$(interface_get)"
-    fi
 
-    IFS=" " read -ra bandwidth <<<"$(get_bandwidth "$network_name")"
+    os=$(os_type)
+    first_measure=($(get_bandwidth "$os"))
+    sleep $sleep_time
+    second_measure=($(get_bandwidth "$os"))
+    download_speed=$(((${second_measure[0]} - ${first_measure[0]}) / $sleep_time))
+    upload_speed=$(((${second_measure[1]} - ${first_measure[1]}) / $sleep_time))
+    echo "↓$(format_speed $download_speed)•↑$(format_speed $upload_speed)"
 
-    if [[ $show_interface == "true" ]]; then echo -n "[$network_name] "; fi
-    echo "↓ $(bandwidth_to_unit "${bandwidth[$DOWNLOAD]}") • ↑ $(bandwidth_to_unit "${bandwidth[$UPLOAD]}")"
-
-    ((counter = counter - 1))
-    sleep "$interval_update"
   done
 }
 
